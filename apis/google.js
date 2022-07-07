@@ -2,6 +2,7 @@ import fs from 'fs';
 import readline from 'readline';
 import {google} from 'googleapis';
 import axios from 'axios';
+import { contactsToContactPhotos } from '../utils/index.js';
 
 // If modifying these scopes, delete token.json.
 const SCOPES = ['https://www.googleapis.com/auth/contacts'];
@@ -101,48 +102,15 @@ export const deleteContacts = (resourceNames) => new Promise((resolve, reject) =
     });
 });
 
-export const createContacts = (person) => new Promise((resolve, reject) => {
+export const createContacts = (contacts) => new Promise((resolve, reject) => {
   const credentials = JSON.parse(fs.readFileSync('credentials.json'));
   authorize(credentials, (auth) => {
       const service = google.people({version: 'v1', auth});
       service.people.batchCreateContacts({
         requestBody: {
-          contacts: [{
-            contactPerson: {
-              names: [{
-                "familyName": person.lastName,
-                "givenName": person.firstName,
-                "unstructuredName": person.fullName
-              }],
-              phoneNumbers: [{
-                type: 'main',
-                value: person.mobileNumber
-              }],
-              emailAddresses: [{
-                type: 'home',
-                value: person.email
-              }],
-              organizations: [{
-                type: 'work',
-                current: true,
-                name: person.company,
-                department: person.department,
-                title: person.jobTitle
-              }],
-              addresses: [{
-                type: 'home',
-                streetAddress: person.address1,
-                extendedAddress: person.address2,
-                city: person.city,
-                region: person.state,
-                postalCode: person.zipcode
-              }],
-              urls: [{
-                type: 'home',
-                value: person.website
-              }]
-            }
-          }],
+          contacts: contacts.map(({ contactPerson }) => ({
+            contactPerson
+          })),
           readMask: 'names'
         },
       }, 
@@ -151,21 +119,33 @@ export const createContacts = (person) => new Promise((resolve, reject) => {
           console.dir(err);
           reject('The API returned an error: ' + err);
         }
-        const resourceName = res.data.createdPeople[0].requestedResourceName;
-
-        if (person.photoUrl) {
-          const service = google.people({version: 'v1', auth});
-          const response = await axios.get(person.photoUrl, { responseType: 'arraybuffer' });
-          const photoBytes = Buffer.from(response.data, 'binary').toString('base64');
-
-          await service.people.updateContactPhoto({
-            resourceName,
-            requestBody: {
-              photoBytes
-            }
-          })
-        }
-        resolve(res);
+        const service = google.people({version: 'v1', auth});
+        const { createdPeople } = res.data;
+        const contactPhotos = contactsToContactPhotos(contacts, createdPeople);
+        await updateContactPhotos(contactPhotos, service);
+        resolve(createdPeople);
     })
   });
 });
+
+async function updateContactPhotos(contactPhotos, service) {
+  const { photoUrl, resourceName } = contactPhotos.shift();
+  try {
+    const response = await axios.get(photoUrl, { responseType: 'arraybuffer' });
+    const photoBytes = Buffer.from(response.data, 'binary').toString('base64');
+
+    await service.people.updateContactPhoto({
+      resourceName,
+      requestBody: {
+        photoBytes
+      }
+    });
+
+    if (contactPhotos.length > 0) {
+      await updateContactPhotos(contactPhotos, service);
+    }
+    return;
+  } catch (error) {
+    return console.error(error);
+  }
+}
